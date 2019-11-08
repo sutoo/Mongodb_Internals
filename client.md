@@ -1,0 +1,18 @@
+
+
+
+
+# package com.mongodb.connection
+主要有3部分
+* connectin相关，分为异步和同步两种
+* cluster,定义了mongo集群，类型有 STANDALONE， REPLICA_SET， SHARD
+* service，cluster中的某个节点，类型STANDALONE，REPLICA_SET_PRIMARY，REPLICA_SET_SECONDARY，REPLICA_SET_ARBITER，SHARD_ROUTER等。
+  从serveice中可以获取connection
+
+# package com.mongodb.internal.connection
+
+connection的实现，是包装了InternalConnection，就是说InternalConnection才是实现细节。而接口InternalConnection的一个实现为：InternalStreamConnection
+InternalConnection中增加了open和close方法，其他的方法主要是sendAndReceive，即向server发送命令，然后接受返回，对应的内部方法分别为sendCommad和receiveCommandMessageResponse。
+sendcommand分为两类：带session和不带session的，所以说sessino是在connection的上层的概念。
+SendCommand的实现也比较简单，把Command和SessionContext打包压缩，写入connection的stream中。Receive也是在当前的Stream上read。
+每个Connection内部包含一个Stream，Stream接口的定义为` A full duplex stream of bytes.`，全双工的bytes的流。
