@@ -174,6 +174,13 @@ mode and waits for manual intervention (likely a call to `resync`). If no viable
 found, `BackgroundSync` waits 1 second and attempts the entire sync source selection process again.
 Otherwise, the secondary found a sync source! At that point `BackgroundSync` starts an OplogFetcher.
 
+从候选人中选出最终的sync sorce
+1 如果候选人没有oplog，放黑名单，重新选候选人
+2 如果候选人的最老的oplog比当前的secondary的最新的oplog时间还要靠后，则也放黑名单。
+3 ？
+
+如果secondary落后所有的sync source很多，则它会进入maintenace mode，等待人工干预。
+
 ### Oplog Entry Application
 
 A separate thread, `RSDataSync` is used for pulling oplog entries off of the oplog buffer and
@@ -189,6 +196,12 @@ not necessarily applied in order. Operations on a document must be atomic and or
 on the same document will be put on the same thread to be serialized. Additionally, command
 operations are done serially in batches of size 1. Insert operations are also batched together for
 improved performance.
+
+找到了sync source之后，secondary需要在本地执行oplog。
+RSDataSync，一个独立的线程，负责从oplog buffer中拉取oplog，然后执行他们。
+RSDataSync，会在一个循环中，不断的创建 SyncTail来真正做事，因为SyncTail会在状态变化时终止oplog执行。
+SyncTail会创建多个线程来并行执行buffer中的oplog，但也是一批一批的执行，每个批次之间是串行，批次内，不同document之间可以串行，
+相同document的op要保证原子和顺序。
 
 ## Replication and Topology Coordinators
 
@@ -219,6 +232,8 @@ normal user commands. For security, nodes use the keyfile to authenticate to eac
 be the system user to run replication commands, so nodes authenticate as the system user when
 issuing remote commands to other nodes.
 
+每个node都有一个全局的ReplicaSetConfig，这个配置中有当前集群中的所有node的host。
+
 Each node communicates with other nodes at regular intervals to:
 
 * Check the liveness of the other nodes (heartbeats)
@@ -227,6 +242,30 @@ Each node communicates with other nodes at regular intervals to:
 
 Each oplog entry is assigned an `OpTime` to describe when it occurred so other nodes can compare how
 up-to-date they are.
+
+每个oplog entry都被赋予了一个`OpTime`，表示了这个op的发生时间。
+```
+shardsvr-rs-0:PRIMARY> db.oplog.rs.findOne()
+{
+        "ts" : Timestamp(1569130347, 51),
+        "t" : NumberLong(2),
+        "h" : NumberLong("-3493345344941468530"),
+        "v" : 2,
+        "op" : "u",
+        "ns" : "atom.atom_task_unit",
+        "ui" : UUID("a38b70bd-9d4e-40c2-920d-c881bc0cafe6"),
+        "o2" : {
+                "_id" : ObjectId("5d81abed1c9c1400016cd177")
+        },
+        "wall" : ISODate("2019-09-22T05:32:27.240Z"),
+        "o" : {
+                "$v" : 1,
+                "$set" : {
+                        "lastSyncTs" : NumberLong("1569130347243")
+                }
+        }
+}
+```
 
 OpTimes include a timestamp and a term field. The term field indicates how many elections have
 occurred since the replica set started.
@@ -259,9 +298,12 @@ source) does not get any information from the request. In the response, however,
 node, the one that issues the `find` to its sync source, gets metadata that it uses to update its
 view of the replica set.
 
+
 There are two types of metadata, `ReplSetMetadata` and `OplogQueryMetadata`. (The
 `OplogQueryMetadata` is new, so there is some temporary field duplication for backwards
 compatibility.)
+
+从sync source，除了可以获取oplog，还会得到一些metadata，包括`ReplSetMetadata` 和 `OplogQueryMetadata`
 
 #### ReplSetMetadata
 
@@ -283,6 +325,10 @@ heartbeats), it steps down.
 The last committed OpTime is only used in this metadata for
 [arbiters](https://docs.mongodb.com/manual/core/replica-set-arbiter/), to advance their committed
 OpTime and in sharding in some places. Otherwise it is ignored.
+
+`ReplSetMetadata`会伴随着没一个replication command返回，其作用包括：
+1 更新当前node的term
+2 arbiter的更新
 
 #### OplogQueryMetadata
 
@@ -306,6 +352,13 @@ the storage engine to erase any old ones if necessary.
 
 Before sending the next `getMore`, the downstream node uses the metadata to check if it should
 change sync sources.
+
+`OplogQueryMetadata`只会伴随着`OplogFetcher`的response返回，
+包含 远端的 last committed OpTime 和 last applied OpTime。
+作用：
+1 重置选举的计时，保证secondaray不会发起选举
+2 用远端的last committed Optime设置本地的committed OpTime
+3 决定是否要换sync source
 
 ### Heartbeats
 
@@ -943,3 +996,9 @@ When a node receives a `dropDatabase` command, it will initiate a Two Phase Drop
 for each collection in the relevant database. Once all collection drops are replicated to a majority
 of nodes, the node will drop the now empty database and a `dropDatabase` command oplog entry is
 written to the oplog.
+
+
+参考：
+https://cloud.tencent.com/developer/article/1398557
+https://yq.aliyun.com/articles/66131
+http://www.mongoing.com/archives/3076
